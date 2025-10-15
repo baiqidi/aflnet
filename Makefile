@@ -69,8 +69,11 @@ afl-as: afl-as.c afl-as.h $(COMM_HDR) | test_x86
 	$(CC) $(CFLAGS) $@.c -o $@ $(LDFLAGS)
 	ln -sf afl-as as
 
-afl-fuzz: afl-fuzz.c $(COMM_HDR) aflnet.o aflnet.h | test_x86
-	$(CC) $(CFLAGS) $@.c aflnet.o -o $@ $(LDFLAGS)
+afl-fuzz：afl-fuzz.c overlay_sched.o queue_entry_types.h $(COMM_HDR) aflnet.o aflnet.h | test_x86
+	$(CC) $（CFLAGS） afl-fuzz.c overlay_sched.o aflnet.o -o $@ $(LDFLAGS)
+
+overlay_sched.o：overlay_sched.c overlay_sched.h queue_entry_types.h
+	$(CC) $（CFLAGS） -c overlay_sched.c -o $@
 
 afl-replay: afl-replay.c $(COMM_HDR) aflnet.o aflnet.h | test_x86
 	$(CC) $(CFLAGS) $@.c aflnet.o -o $@ $(LDFLAGS)

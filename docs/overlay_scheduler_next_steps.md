@@ -5,92 +5,81 @@ novelty-based candidate ordering that now ships with AFLNet.  It follows the
 original proposal step-by-step so you can verify that the implementation is
 behaving as intended and understand where to extend it next.
 
-## 1. Quick start: build & launch
+## 1. 环境配置（Environment setup）
 
-Follow these steps if you simply want to exercise the overlay scheduler on a
-target without digging into the internals yet.
+完成一次覆盖调度器实验之前，先准备一个干净的 Linux 主机或容器，推荐使用基于
+Debian/Ubuntu 的发行版。执行以下命令安装构建 AFLNet 所需的基础依赖：
 
-1. Build AFLNet (installing dependencies if you have not already):
+```bash
+sudo apt-get update
+sudo apt-get install -y build-essential libgraphviz-dev clang pkg-config \
+  python3 python3-venv python3-pip git
+```
 
-   ```bash
-   sudo apt-get update && sudo apt-get install -y build-essential libgraphviz-dev
-   make -j"$(nproc)"
-   ```
+> **提示**：`libgraphviz-dev` 是链接 `afl-fuzz` 时必需的头文件；缺失时会在构建阶段
+> 出现 “missing graphviz development libraries” 的报错。
 
-2. Prepare input (`-i`) and output (`-o`) directories just like a standard
-   AFLNet run.  If you are fuzzing a UDP service named `target` that speaks the
-   protocol `XYZ`, a minimal invocation that enables the overlay diagnostics is:
+随后克隆或更新 AFLNet 代码并完成编译：
+
+```bash
+git clone https://github.com/aflnet/aflnet.git
+cd aflnet
+make -j"$(nproc)"
+```
+
+如果你在已有仓库内工作，只需执行 `git pull` 更新并重新编译即可。
+
+## 2. 实验准备（Prepare inputs & targets）
+
+1. **待测服务**：准备好目标协议实现，例如一个监听在本地端口的 UDP/TCP 服务。
+   * 建议通过 systemd、supervisor 或手工终端启动，确保能够在 fuzzing 期间稳定运行。
+2. **初始语料（`-i`）**：收集或编写最少量的有效输入消息，放入一个目录，例如
+   `./seeds_dir`。这些样例应能触发 IPSM 跟踪，从而生成状态序列。
+3. **输出目录（`-o`）**：创建一个空目录用于保存 AFLNet 运行过程中的中间结果，
+   如 `./findings_dir`。
+4. **环境变量**：决定是否启用调试输出：
+   * `AFL_DEBUG_OVERLAY=1` 会打印每次候选排序的详细日志。
+   * `AFL_STAT_OVERLAY=1` 会输出聚类、轮转计数和新颖度分数的统计。
+
+## 3. 实验步骤（Run the experiment）
+
+1. **启动目标服务**（若需要）并记录其监听地址/端口。
+2. **运行 AFLNet**：依据协议类型设置 `-N`（传输层）和 `-P`（协议名称），再加上
+   `-D` 指定超时时间。例如 fuzz 一个 UDP 协议 `XYZ` 的服务：
 
    ```bash
    AFL_DEBUG_OVERLAY=1 AFL_STAT_OVERLAY=1 ./afl-fuzz \
      -i seeds_dir -o findings_dir \
-     -N udp -P XYZ -D 1000 -- ./target @@
+     -N udp -P XYZ -D 1000 -- ./target_binary @@
    ```
 
-   Replace the arguments with the transport, protocol, and command line that
-   match your setup (see `README.md` for full AFLNet usage).  The overlay
-   scheduler automatically wraps the candidate selection logic once `afl-fuzz`
-   starts; no extra flags are required beyond the optional debug toggles shown
-   above.
+   * 如果需要 TLS、TCP 或自定义端口，请参考 `README.md` 调整附加参数。
+   * 运行后在终端中观察 `overlay: cluster=... novelty=...` 等日志，确认覆盖调度器
+     已经接管候选排序流程。
+3. **监控运行状态**：
+   * 在 AFLNet 主界面关注 `#queue`, `pending_favs` 等指标判断整体进展。
+   * 结合 `AFL_STAT_OVERLAY` 输出，查看每个簇的候选数量、当前轮转位置以及被选中
+     种子的 `novelty = 1 - avg_sim_all`。
+4. **收集中间数据**：若需要更深入分析，可定期复制 `findings_dir/fuzzer_stats` 和
+   `overlay_stats.log`（当启用 `AFL_STAT_OVERLAY=1` 时生成）。
 
-3. Inspect the terminal output for messages such as
-   `overlay: cluster=... novelty=...` to confirm that the scheduler is rotating
-   through clusters.  These come from the `AFL_DEBUG_OVERLAY` and
-   `AFL_STAT_OVERLAY` environment variables and can be disabled once you are
-   satisfied that everything is wired up correctly.
+## 4. 校验特征提取（Validate feature extraction）
 
-## 2. Prepare runtime dependencies
+1. 保持 `AFL_DEBUG_OVERLAY=1`，在日志中关注 `msg_count`, `state_count` 等字段。
+   它们分别来自 `overlay_extract_messages()` 与缓存的状态序列，可用来核对消息切分
+   与直方图统计是否符合预期。
+2. 如果发现消息边界异常，检查 `aflnet.c` 中写入 `region_t` 结构的逻辑，确认记录的
+   `start_off` / `end_off` 与实际报文对应。
 
-1. Install Graphviz headers (`libgraphviz-dev` or an equivalent package) so that
-   `afl-fuzz` links successfully:
+## 5. 分析聚类与轮转结果（Inspect clustering & scheduling）
 
-   ```bash
-   sudo apt-get install -y libgraphviz-dev
-   make -j$(nproc)
-   ```
+1. 在 `AFL_STAT_OVERLAY` 输出中比对不同簇的 `signature`；若全部种子落在同一簇，
+   可能意味着 IPSM 状态序列完全一致，可以通过增加目标覆盖或手动构造差异输入来
+   拉开簇。
+2. 观察 `overlay_rr_pos` 或类似字段，确认轮转指针按簇依次推进。构造“多 vs. 少”
+   种子簇的对比实验，验证轮转不会让小簇长期饥饿。
 
-   The new overlay code is already included in the default build; compiling is
-   enough to pick up the changes.
-
-2. Ensure your input corpus still contains the IPSM traces required for
-   clustering.  The implementation consumes the `region_t.state_sequence`
-   buffers recorded by AFLNet during replay, so runs without IPSM data will
-   fall back to single-cluster behavior.
-
-## 3. Validate feature extraction
-
-1. Launch AFLNet with `AFL_DEBUG_OVERLAY=1` (see `overlay_sched.c`) to emit
-   debug messages showing how many messages and states each seed contributes.
-   This allows you to confirm that message boundaries and histograms are being
-   reconstructed correctly from the saved seed files.
-
-2. If message boundaries appear incorrect, re-check the instrumentation that
-   writes `region_t` entries (see `aflnet.c`).  The overlay scheduler trusts
-   those offsets verbatim when slicing message histograms.
-
-## 4. Inspect clustering output
-
-1. Collect the scheduler statistics printed under `AFL_STAT_OVERLAY=1`.  The
-   novelty scores correspond to `1 - avg_sim_all` in the proposal, so higher
-   values indicate more novel seeds.
-
-2. When you observe an unexpected single-cluster run, dump the cached
-   `signature` values (via `AFL_DEBUG_OVERLAY`) to confirm whether the IPSM
-   shingle hash is constant.  Identical state sequences are expected to land in
-   the same cluster.
-
-## 5. Exercise the round-robin selector
-
-1. Run a fuzzing session long enough to cycle through multiple clusters.
-   Inspect the debug log to verify that the scheduler alternates between
-   clusters (`overlay_rr_pos` keeps the rotation state).
-
-2. To stress-test fairness, build a synthetic corpus where one cluster contains
-   many seeds with similar messages and another contains just one unique seed.
-   The round-robin policy should keep advancing both clusters instead of
-   starving the singleton.
-
-## 6. Next extensions
+## 6. 后续扩展（Next extensions）
 
 * If you plan to experiment with alternative similarity measures, swap out
   `overlay_seq_similarity` with the desired routine.  The rest of the pipeline

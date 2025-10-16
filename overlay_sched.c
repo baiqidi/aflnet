@@ -4,6 +4,7 @@
 
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define OVERLAY_QUEUE_WINDOW 16
@@ -12,7 +13,8 @@ static struct queue_entry **overlay_queue_window = NULL;
 static u32 overlay_queue_count = 0;
 static struct queue_entry *overlay_queue_next_ptr = NULL;
 static struct queue_entry *overlay_queue_next_cur = NULL;
-static u64 overlay_rr_pos = 0;
+static u64 overlay_rr_counter = 0;
+static u64 overlay_rr_slots = 0;
 
 static inline u32 rol32(u32 x, u8 r) {
   return (x << r) | (x >> (32 - r));
@@ -25,6 +27,7 @@ void overlay_queue_prepare_entry(struct queue_entry *qe) {
     sess_feat_t *feat = qe->sess_feat;
     if (feat->msg_hists) ck_free(feat->msg_hists);
     if (feat->states) ck_free(feat->states);
+    if (feat->state_set) ck_free(feat->state_set);
     ck_free(feat);
   }
   qe->sess_feat = NULL;
@@ -35,6 +38,7 @@ void overlay_queue_release_entry(struct queue_entry *qe) {
   sess_feat_t *feat = qe->sess_feat;
   if (feat->msg_hists) ck_free(feat->msg_hists);
   if (feat->states) ck_free(feat->states);
+  if (feat->state_set) ck_free(feat->state_set);
   ck_free(feat);
   qe->sess_feat = NULL;
   qe->novelty_score = 0.0f;
@@ -44,34 +48,29 @@ void overlay_queue_reset(void) {
   overlay_queue_count = 0;
   overlay_queue_next_ptr = NULL;
   overlay_queue_next_cur = NULL;
+  overlay_rr_counter = 0;
+  overlay_rr_slots = 0;
 }
 
 struct queue_entry *overlay_queue_current(void) {
   return overlay_queue_next_cur;
 }
 
-static u32 state_signature_k3(const u16 *states, u32 n_states) {
+static int cmp_u16(const void *a, const void *b) {
+  const u16 va = *(const u16 *)a;
+  const u16 vb = *(const u16 *)b;
+  if (va < vb) return -1;
+  if (va > vb) return 1;
+  return 0;
+}
+
+static u32 state_set_signature(const u16 *states, u32 n_states) {
   if (!states || !n_states) return 0;
 
   u32 hash = 2166136261u;
-
-  if (n_states < 3) {
-    for (u32 i = 0; i < n_states; ++i) {
-      hash ^= (u32)states[i] + 0x9e3779b9u * i;
-      hash *= 16777619u;
-    }
-    hash ^= n_states;
-    return hash;
-  }
-
-  for (u32 i = 0; i + 2 < n_states; ++i) {
-    u32 a = (u32)states[i];
-    u32 b = (u32)states[i + 1];
-    u32 c = (u32)states[i + 2];
-    u32 shingle = rol32(a ^ (b + 0x9e3779b9u), 7);
-    shingle = rol32(shingle ^ (c + 0x7f4a7c15u), 11);
-    hash ^= shingle + i * 0x9e3779b9u;
-    hash = rol32(hash, 3) * 16777619u;
+  for (u32 i = 0; i < n_states; ++i) {
+    hash ^= (u32)states[i];
+    hash *= 16777619u;
   }
 
   hash ^= n_states;
@@ -151,16 +150,44 @@ sess_feat_t *overlay_feat_get_or_build(struct queue_entry *qe) {
   }
 
   feat->state_count = state_count;
+  feat->state_set_count = 0;
+  feat->state_set = NULL;
   if (state_count && states_src) {
     feat->states = (u16 *)ck_alloc(sizeof(u16) * state_count);
     for (u32 i = 0; i < state_count; ++i) {
       feat->states[i] = (u16)(states_src[i] & 0xFFFF);
     }
+
+    feat->state_set = (u16 *)ck_alloc(sizeof(u16) * state_count);
+    memcpy(feat->state_set, feat->states, sizeof(u16) * state_count);
+    qsort(feat->state_set, state_count, sizeof(u16), cmp_u16);
+
+    u32 unique = 0;
+    for (u32 i = 0; i < state_count; ++i) {
+      if (!i || feat->state_set[i] != feat->state_set[i - 1]) {
+        feat->state_set[unique++] = feat->state_set[i];
+      }
+    }
+
+    if (unique) {
+      u16 *dedup = (u16 *)ck_alloc(sizeof(u16) * unique);
+      memcpy(dedup, feat->state_set, sizeof(u16) * unique);
+      ck_free(feat->state_set);
+      feat->state_set = dedup;
+      feat->state_set_count = unique;
+    } else {
+      ck_free(feat->state_set);
+      feat->state_set = NULL;
+      feat->state_set_count = 0;
+    }
+
   } else {
     feat->states = NULL;
+    feat->state_set = NULL;
+    feat->state_set_count = 0;
   }
 
-  feat->signature = state_signature_k3(feat->states, feat->state_count);
+  feat->signature = state_set_signature(feat->state_set, feat->state_set_count);
   feat->built = 1;
 
   qe->sess_feat = feat;
@@ -181,56 +208,20 @@ float overlay_seq_similarity(const sess_feat_t *A, const sess_feat_t *B) {
   u32 m = A->msg_count;
   u32 n = B->msg_count;
 
-  if (!m || !n) return 0.0f;
+  if (!m && !n) return 0.0f;
 
-  float *sims = (float *)ck_alloc(sizeof(float) * m * n);
-  for (u32 i = 0; i < m; ++i) {
-    for (u32 j = 0; j < n; ++j) {
-      sims[i * n + j] = histogram_similarity(A->msg_hists + i * 256,
-                                             B->msg_hists + j * 256);
-    }
-  }
-
-  u8 *usedA = (u8 *)ck_alloc(m);
-  u8 *usedB = (u8 *)ck_alloc(n);
-  memset(usedA, 0, m);
-  memset(usedB, 0, n);
+  u32 max_len = m > n ? m : n;
+  if (!max_len) return 0.0f;
 
   float total = 0.0f;
-  u32 matches = 0;
-  u32 max_pairs = m < n ? m : n;
-
-  while (matches < max_pairs) {
-    float best = -1.0f;
-    u32 best_i = 0, best_j = 0;
-    for (u32 i = 0; i < m; ++i) {
-      if (usedA[i]) continue;
-      for (u32 j = 0; j < n; ++j) {
-        if (usedB[j]) continue;
-        float val = sims[i * n + j];
-        if (val > best) {
-          best = val;
-          best_i = i;
-          best_j = j;
-        }
-      }
+  for (u32 i = 0; i < max_len; ++i) {
+    if (i < m && i < n) {
+      total += histogram_similarity(A->msg_hists + i * 256,
+                                    B->msg_hists + i * 256);
     }
-
-    if (best < 0.0f) break;
-
-    usedA[best_i] = 1;
-    usedB[best_j] = 1;
-    total += best;
-    matches++;
   }
 
-  ck_free(sims);
-  ck_free(usedA);
-  ck_free(usedB);
-
-  u32 denom = m > n ? m : n;
-  if (!denom) return 0.0f;
-  return total / (float)denom;
+  return total / (float)max_len;
 }
 
 struct queue_entry *overlay_pick_next(struct queue_entry **cand, u32 n_cand) {
@@ -246,29 +237,49 @@ struct queue_entry *overlay_pick_next(struct queue_entry **cand, u32 n_cand) {
 
   struct cluster_info {
     u32 signature;
+    u32 state_set_count;
+    const u16 *state_set;
     u32 count;
     u32 *indices;
     float *scores;
     u32 *order;
   };
 
-  struct cluster_info *clusters = (struct cluster_info *)ck_alloc(sizeof(struct cluster_info) * n_cand);
+  struct cluster_info *clusters =
+      (struct cluster_info *)ck_alloc(sizeof(struct cluster_info) * n_cand);
+  memset(clusters, 0, sizeof(struct cluster_info) * n_cand);
   u32 cluster_count = 0;
 
   for (u32 i = 0; i < n_cand; ++i) {
-    u32 sig = features[i] ? features[i]->signature : 0;
+    sess_feat_t *feat = features[i];
+    u32 sig = feat ? feat->signature : 0;
+    u32 set_count = feat ? feat->state_set_count : 0;
+    const u16 *set_ptr = (feat && feat->state_set_count) ? feat->state_set : NULL;
     u32 cid = 0;
+
     for (; cid < cluster_count; ++cid) {
-      if (clusters[cid].signature == sig) break;
+      if (clusters[cid].signature != sig) continue;
+      if (clusters[cid].state_set_count != set_count) continue;
+      if (!set_count) break;
+      if (!clusters[cid].state_set && !set_ptr) break;
+      if (clusters[cid].state_set && set_ptr &&
+          memcmp(clusters[cid].state_set, set_ptr,
+                 sizeof(u16) * set_count) == 0) {
+        break;
+      }
     }
+
     if (cid == cluster_count) {
       clusters[cid].signature = sig;
+      clusters[cid].state_set_count = set_count;
+      clusters[cid].state_set = set_ptr;
       clusters[cid].count = 0;
       clusters[cid].indices = (u32 *)ck_alloc(sizeof(u32) * n_cand);
       clusters[cid].scores = NULL;
       clusters[cid].order = NULL;
       cluster_count++;
     }
+
     clusters[cid].indices[clusters[cid].count++] = i;
   }
 
@@ -333,7 +344,11 @@ struct queue_entry *overlay_pick_next(struct queue_entry **cand, u32 n_cand) {
   }
 
   u32 total = 0;
-  for (u32 cid = 0; cid < cluster_count; ++cid) total += clusters[cid].count;
+  u32 max_depth = 0;
+  for (u32 cid = 0; cid < cluster_count; ++cid) {
+    total += clusters[cid].count;
+    if (clusters[cid].count > max_depth) max_depth = clusters[cid].count;
+  }
 
   if (!total) {
     ck_free(features);
@@ -347,28 +362,31 @@ struct queue_entry *overlay_pick_next(struct queue_entry **cand, u32 n_cand) {
   }
 
   struct queue_entry *selected = NULL;
-  u32 start_pos = (u32)(overlay_rr_pos % cluster_count);
-  u32 depth = 0;
+  u64 slots = (u64)cluster_count * (u64)(max_depth ? max_depth : 1);
+  if (!slots) {
+    overlay_rr_counter = 0;
+    overlay_rr_slots = 0;
+    selected = candidates[0];
+  } else {
+    if (overlay_rr_slots != slots) {
+      overlay_rr_counter = slots ? (overlay_rr_counter % slots) : 0;
+    }
+    overlay_rr_slots = slots;
 
-  while (!selected && depth < total) {
-    int any = 0;
-    for (u32 step = 0; step < cluster_count; ++step) {
-      u32 cid = (start_pos + step) % cluster_count;
+    for (u64 step = 0; step < slots && !selected; ++step) {
+      u64 pos = overlay_rr_counter;
+      overlay_rr_counter = (overlay_rr_counter + 1) % slots;
+      u32 layer = (u32)(pos / cluster_count);
+      u32 cid = (u32)(pos % cluster_count);
+      if (layer >= clusters[cid].count) continue;
       struct cluster_info *cluster = &clusters[cid];
-      if (depth >= cluster->count) continue;
-      any = 1;
-      u32 idx_in_cluster = cluster->order[depth];
+      u32 idx_in_cluster = cluster->order[layer];
       u32 candidate_index = cluster->indices[idx_in_cluster];
       selected = candidates[candidate_index];
-      if (selected) break;
     }
-    if (!any) break;
-    depth++;
+
+    if (!selected) selected = candidates[0];
   }
-
-  if (!selected) selected = candidates[0];
-
-  overlay_rr_pos = (overlay_rr_pos + 1) % (cluster_count ? cluster_count : 1);
 
   for (u32 cid = 0; cid < cluster_count; ++cid) {
     ck_free(clusters[cid].indices);

@@ -11,9 +11,9 @@ typedef struct sess_feat {
   u32 msg_count;
   float *msg_hists;
   u32 state_count;
-  u16 *states;
+  u32 *states;
   u32 state_set_count;
-  u16 *state_set;
+  u32 *state_set;
   u32 signature;
   u8 built;
 } sess_feat_t;

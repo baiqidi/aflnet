@@ -56,15 +56,15 @@ struct queue_entry *overlay_queue_current(void) {
   return overlay_queue_next_cur;
 }
 
-static int cmp_u16(const void *a, const void *b) {
-  const u16 va = *(const u16 *)a;
-  const u16 vb = *(const u16 *)b;
+static int cmp_u32(const void *a, const void *b) {
+  const u32 va = *(const u32 *)a;
+  const u32 vb = *(const u32 *)b;
   if (va < vb) return -1;
   if (va > vb) return 1;
   return 0;
 }
 
-static u32 state_set_signature(const u16 *states, u32 n_states) {
+static u32 state_set_signature(const u32 *states, u32 n_states) {
   if (!states || !n_states) return 0;
 
   u32 hash = 2166136261u;
@@ -153,14 +153,14 @@ sess_feat_t *overlay_feat_get_or_build(struct queue_entry *qe) {
   feat->state_set_count = 0;
   feat->state_set = NULL;
   if (state_count && states_src) {
-    feat->states = (u16 *)ck_alloc(sizeof(u16) * state_count);
+    feat->states = (u32 *)ck_alloc(sizeof(u32) * state_count);
     for (u32 i = 0; i < state_count; ++i) {
-      feat->states[i] = (u16)(states_src[i] & 0xFFFF);
+      feat->states[i] = states_src[i];
     }
 
-    feat->state_set = (u16 *)ck_alloc(sizeof(u16) * state_count);
-    memcpy(feat->state_set, feat->states, sizeof(u16) * state_count);
-    qsort(feat->state_set, state_count, sizeof(u16), cmp_u16);
+    feat->state_set = (u32 *)ck_alloc(sizeof(u32) * state_count);
+    memcpy(feat->state_set, feat->states, sizeof(u32) * state_count);
+    qsort(feat->state_set, state_count, sizeof(u32), cmp_u32);
 
     u32 unique = 0;
     for (u32 i = 0; i < state_count; ++i) {
@@ -170,8 +170,8 @@ sess_feat_t *overlay_feat_get_or_build(struct queue_entry *qe) {
     }
 
     if (unique) {
-      u16 *dedup = (u16 *)ck_alloc(sizeof(u16) * unique);
-      memcpy(dedup, feat->state_set, sizeof(u16) * unique);
+      u32 *dedup = (u32 *)ck_alloc(sizeof(u32) * unique);
+      memcpy(dedup, feat->state_set, sizeof(u32) * unique);
       ck_free(feat->state_set);
       feat->state_set = dedup;
       feat->state_set_count = unique;
@@ -238,7 +238,7 @@ struct queue_entry *overlay_pick_next(struct queue_entry **cand, u32 n_cand) {
   struct cluster_info {
     u32 signature;
     u32 state_set_count;
-    const u16 *state_set;
+    const u32 *state_set;
     u32 count;
     u32 *indices;
     float *scores;
@@ -254,7 +254,7 @@ struct queue_entry *overlay_pick_next(struct queue_entry **cand, u32 n_cand) {
     sess_feat_t *feat = features[i];
     u32 sig = feat ? feat->signature : 0;
     u32 set_count = feat ? feat->state_set_count : 0;
-    const u16 *set_ptr = (feat && feat->state_set_count) ? feat->state_set : NULL;
+    const u32 *set_ptr = (feat && feat->state_set_count) ? feat->state_set : NULL;
     u32 cid = 0;
 
     for (; cid < cluster_count; ++cid) {
@@ -264,7 +264,7 @@ struct queue_entry *overlay_pick_next(struct queue_entry **cand, u32 n_cand) {
       if (!clusters[cid].state_set && !set_ptr) break;
       if (clusters[cid].state_set && set_ptr &&
           memcmp(clusters[cid].state_set, set_ptr,
-                 sizeof(u16) * set_count) == 0) {
+                 sizeof(u32) * set_count) == 0) {
         break;
       }
     }

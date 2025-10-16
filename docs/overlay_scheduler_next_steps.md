@@ -5,7 +5,41 @@ novelty-based candidate ordering that now ships with AFLNet.  It follows the
 original proposal step-by-step so you can verify that the implementation is
 behaving as intended and understand where to extend it next.
 
-## 1. Prepare runtime dependencies
+## 1. Quick start: build & launch
+
+Follow these steps if you simply want to exercise the overlay scheduler on a
+target without digging into the internals yet.
+
+1. Build AFLNet (installing dependencies if you have not already):
+
+   ```bash
+   sudo apt-get update && sudo apt-get install -y build-essential libgraphviz-dev
+   make -j"$(nproc)"
+   ```
+
+2. Prepare input (`-i`) and output (`-o`) directories just like a standard
+   AFLNet run.  If you are fuzzing a UDP service named `target` that speaks the
+   protocol `XYZ`, a minimal invocation that enables the overlay diagnostics is:
+
+   ```bash
+   AFL_DEBUG_OVERLAY=1 AFL_STAT_OVERLAY=1 ./afl-fuzz \
+     -i seeds_dir -o findings_dir \
+     -N udp -P XYZ -D 1000 -- ./target @@
+   ```
+
+   Replace the arguments with the transport, protocol, and command line that
+   match your setup (see `README.md` for full AFLNet usage).  The overlay
+   scheduler automatically wraps the candidate selection logic once `afl-fuzz`
+   starts; no extra flags are required beyond the optional debug toggles shown
+   above.
+
+3. Inspect the terminal output for messages such as
+   `overlay: cluster=... novelty=...` to confirm that the scheduler is rotating
+   through clusters.  These come from the `AFL_DEBUG_OVERLAY` and
+   `AFL_STAT_OVERLAY` environment variables and can be disabled once you are
+   satisfied that everything is wired up correctly.
+
+## 2. Prepare runtime dependencies
 
 1. Install Graphviz headers (`libgraphviz-dev` or an equivalent package) so that
    `afl-fuzz` links successfully:
@@ -23,7 +57,7 @@ behaving as intended and understand where to extend it next.
    buffers recorded by AFLNet during replay, so runs without IPSM data will
    fall back to single-cluster behavior.
 
-## 2. Validate feature extraction
+## 3. Validate feature extraction
 
 1. Launch AFLNet with `AFL_DEBUG_OVERLAY=1` (see `overlay_sched.c`) to emit
    debug messages showing how many messages and states each seed contributes.
@@ -34,7 +68,7 @@ behaving as intended and understand where to extend it next.
    writes `region_t` entries (see `aflnet.c`).  The overlay scheduler trusts
    those offsets verbatim when slicing message histograms.
 
-## 3. Inspect clustering output
+## 4. Inspect clustering output
 
 1. Collect the scheduler statistics printed under `AFL_STAT_OVERLAY=1`.  The
    novelty scores correspond to `1 - avg_sim_all` in the proposal, so higher
@@ -45,7 +79,7 @@ behaving as intended and understand where to extend it next.
    shingle hash is constant.  Identical state sequences are expected to land in
    the same cluster.
 
-## 4. Exercise the round-robin selector
+## 5. Exercise the round-robin selector
 
 1. Run a fuzzing session long enough to cycle through multiple clusters.
    Inspect the debug log to verify that the scheduler alternates between
@@ -56,7 +90,7 @@ behaving as intended and understand where to extend it next.
    The round-robin policy should keep advancing both clusters instead of
    starving the singleton.
 
-## 5. Next extensions
+## 6. Next extensions
 
 * If you plan to experiment with alternative similarity measures, swap out
   `overlay_seq_similarity` with the desired routine.  The rest of the pipeline

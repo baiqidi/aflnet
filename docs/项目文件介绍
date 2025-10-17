@@ -1,0 +1,39 @@
+| 项目                                                                                                                                                                                        | 含义与主要内容                                                                                                                    | 备注                       |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- | ------------------------ |
+| `README.md`, `README-AFL.md`, `README-DEVELOPERS.md`                                                                                                                                      | 顶层文档：分别概述 AFLNet 项目、原生 AFL 使用说明、以及面向开发者的扩展与调试指南。                                                                           | :codex-terminal-citation |
+| `LICENSE`, `CONTRIBUTING.md`                                                                                                                                                              | 许可协议与贡献指南。                                                                                                                 | :codex-terminal-citation |
+| `Makefile`                                                                                                                                                                                | 主构建脚本，负责编译 `afl-fuzz`、`aflnet` 及其辅助工具。                                                                                     | :codex-terminal-citation |
+| `Dockerfile`                                                                                                                                                                              | 提供容器化环境配置，用于快速拉起可复现的 AFLNet 开发/实验环境。                                                                                       | :codex-terminal-citation |
+| `docs/`                                                                                                                                                                                   | 额外文档（例如 overlay 调度器实验步骤、IPSM 说明等），帮助了解高级功能与实验流程。                                                                           | :codex-terminal-citation |
+| `tutorials/`                                                                                                                                                                              | 官方教程与示例（如 Live555、RTSP 等）说明如何获取种子、搭建协议服务并运行 AFLNet。                                                                        | :codex-terminal-citation |
+| `testcases/`                                                                                                                                                                              | 示例/用户自备的初始语料目录，配合 `-i` 选项作为输入种子。                                                                                           | :codex-terminal-citation |
+| `dictionaries/`                                                                                                                                                                           | 包含协议专用字典文件，可在模糊测试时通过 `-x` 指定以增强突变效果。                                                                                       | :codex-terminal-citation |
+| `experimental/`                                                                                                                                                                           | 存放实验性或备用工具/脚本，可能包含未完全稳定的功能。                                                                                                | :codex-terminal-citation |
+| `llvm_mode/`, `qemu_mode/`, `android-ashmem.h`                                                                                                                                            | 支持不同插桩后端（Clang/LLVM、QEMU），以及 Android 共享内存相关定义。                                                                             | :codex-terminal-citation |
+| `libdislocator/`, `libtokencap/`                                                                                                                                                          | 附带的辅助库：前者实现低碎片堆分配器，后者是 token capture 插件。                                                                                   | :codex-terminal-citation |
+| `afl-fuzz.c`, `aflnet.c`, `aflnet.h`, `afl-*.c/h` 系列                                                                                                                                      | 核心模糊器源码：`afl-fuzz.c` 是主程序，`aflnet.c/h` 包含网络协议扩展；其余 `afl-*` 文件是 AFLNet 派生的工具（如 `afl-analyze`, `afl-whatsup`, `afl-tmin` 等）。 | :codex-terminal-citation |
+| `overlay_sched.c`, `overlay_sched.h`, `queue_entry_types.h`                                                                                                                               | 叠加调度器实现：负责候选种子特征提取、状态集合划分、新颖度计算及轮转策略。                                                                                      | :codex-terminal-citation |
+| `hash.h`, `khash.h`, `klist.h`, `alloc-inl.h`, `types.h`, `config.h`, `debug.h`                                                                                                           | 常用的工具宏、数据结构与配置头文件；在各个源码模块间共享。                                                                                              | :codex-terminal-citation |
+| `ipsm_state_sequences.md`                                                                                                                                                                 | 说明 AFLNet 如何记录与利用 IPSM 状态序列。                                                                                               | :codex-terminal-citation |
+| `afl-replay.c`, `aflnet-replay.c`, `afl-showmap.c`, `afl-tmin.c`, `afl-cmin`, `afl-whatsup`, `afl-gcc.c`, `afl-as.c`, `afl-as.h`, `afl-plot`, `test-instr.c`, `test-libfuzzer-target.c` 等 | AFL/AFLNet 附带的辅助工具：如重放、覆盖映射、最小化语料、可视化、编译器包装器以及测试目标。                                                                        | :codex-terminal-citation |
+
+目录项说明（out-live555/）
+fuzz_bitmap：AFLNet 在发现新的覆盖后将共享内存位图写入该文件，供 -B 选项或后续会话重用覆盖信息。
+
+fuzzer_stats：机器可读的运行概览，记录当前轮次、执行速度、队列规模、挂起条目等字段，便于脚本化监控；同目录还会生成配套的 plot_data 历史文件。
+
+ipsm.dot：叠加状态机推断模块定期把当前 IPSM 图以 Graphviz DOT 形式写入此文件，便于用 xdot 等工具查看状态覆盖进度。
+
+plot_data：按时间追加的统计曲线（如总路径数、执行速度等），可用 afl-plot 生成图表；与 fuzzer_stats 一同更新。
+
+queue/：当前语料库中每条独特路径的测试用例及所有初始种子，按 id:000000 等前缀编号，供调度器循环处理。
+
+regions/：为调试记录每个种子划分出的消息“区域”（起止字节偏移），便于复核请求边界和状态序列构建。
+
+replayable-crashes/：保存可复现崩溃路径的消息序列，命名中包含崩溃 ID 和信号编号，既有文档说明也在崩溃处理分支中生成。
+
+replayable-hangs/：与上类似，收集导致目标超时（挂起）的会话消息，以便离线重放和调试。
+
+replayable-new-ipsm-paths/：当发现新的 IPSM 状态路径时，把对应的消息序列写到这里，文件名编码状态序列字符串用于追踪新路径来源。
+
+replayable-queue/：初始 dry-run 阶段会把每条基线队列种子的消息序列落盘，方便之后独立重放这些输入。

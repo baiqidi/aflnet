@@ -1,0 +1,13 @@
+## 概括
+添加了 docs/overlay_scheduler_code_overview.md 来记录 AFLNet 中的覆盖调度程序的队列元数据、功能缓存、新颖性评分和集成接触点。
+
+## 细节
+队列条目公开 novelty_score 和延迟填充的 sess_feat 包，因此调度程序可以将直方图和状态集数据与传统的 AFLNet 元数据一起缓存。
+
+overlay_queue_prepare_entry() / overlay_queue_release_entry() 重置这些缓存，而 overlay_feat_get_or_build() 构建每个消息字节直方图，复制最新的 IPSM 状态序列，将其重复数据删除为顺序不敏感的集合，并对结果进行散列以进行聚类。
+
+overlay_seq_similarity() 比较对齐的消息直方图， overlay_pick_next() 根据相同的状态集对候选者进行分组，用 1 - avg_sim_all 对每个种子进行评分，在每个组内进行排序，然后在集群之间循环，以便每个状态集都贡献工作。
+
+overlay_pick_from_queue_window() 通过滑动窗口提供队列遍历，以便现有的 AFLNet 循环可以保留其批处理逻辑，同时将最终选择推迟到覆盖策略。
+
+主模糊测试循环和 IPSM 引导的选择器现在调用覆盖助手，确保两种调度模式都重用新颖性排序，而不会改变 AFLNet 的原始启发式方法或能量核算。

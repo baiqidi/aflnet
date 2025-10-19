@@ -92,5 +92,30 @@ make -j"$(nproc)"
   window helper; wire it into custom scheduling strategies if you need to reuse
   the novelty ordering outside of `pick_next_entry()`.
 
+## 7. 复用现有输出目录（Resume from an existing findings dir）
+
+Recommendation
+
+Reuse the existing fuzzing output directory by launching AFLNet in "in-place resume" mode: pass -i- (a literal dash) so the fuzzer treats the directory named by -o as both the output location and the source of prior state. AFLNet’s own documentation shows this exact pattern: ./afl-fuzz -i- -o existing_output_dir [...etc...].
+
+Ensure the previous run has stopped before resuming, because the resume code temporarily moves files under _resume/ inside that directory while it restores the queue and metadata. Starting multiple fuzzers against the same output tree at once can corrupt the corpus.
+
+Your revised command would therefore look like:
+
+```bash
+AFL_DEBUG_OVERLAY=1 AFL_STAT_OVERLAY=1 timeout 1h \
+  /home/hxq/Documents/AFLnet-sort/aflnet/afl-fuzz -d \
+  -i- \
+  -o /home/hxq/Documents/AFLnet-sort/live555/testProgs/out-live555 \
+  -N tcp://127.0.0.1/8554 \
+  -x $AFLNET/tutorials/live555/rtsp.dict \
+  -P RTSP -D 10000 -q 3 -s 3 -E -K \
+  -R ./testOnDemandRTSPServer 8554
+```
+
+This tells AFLNet to resume directly in the existing out-live555 directory instead of creating a new one, while leaving the rest of your parameters untouched.
+
+If you need to archive the old results before resuming, create a backup copy first; the resume process may rename files as it reconstructs the queue, so keeping a snapshot ensures you can roll back if necessary.
+
 Following these steps should help you confirm that the implementation matches
 the plan and highlight the exact touch points for further experimentation.

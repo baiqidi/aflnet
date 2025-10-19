@@ -205,23 +205,58 @@ static float histogram_similarity(const float *a, const float *b) {
 
 float overlay_seq_similarity(const sess_feat_t *A, const sess_feat_t *B) {
   if (!A || !B) return 0.0f;
+
   u32 m = A->msg_count;
   u32 n = B->msg_count;
 
   if (!m && !n) return 0.0f;
 
-  u32 max_len = m > n ? m : n;
-  if (!max_len) return 0.0f;
+  u32 denom = m > n ? m : n;
+  if (!denom) return 0.0f;
 
-  float total = 0.0f;
-  for (u32 i = 0; i < max_len; ++i) {
-    if (i < m && i < n) {
-      total += histogram_similarity(A->msg_hists + i * 256,
-                                    B->msg_hists + i * 256);
+  if (!A->msg_hists || !B->msg_hists) return 0.0f;
+
+  u32 pair_count = m < n ? m : n;
+  float sum = 0.0f;
+
+  if (pair_count) {
+    u8 *used_a = (u8 *)ck_alloc(m);
+    u8 *used_b = (u8 *)ck_alloc(n);
+    memset(used_a, 0, m);
+    memset(used_b, 0, n);
+
+    for (u32 k = 0; k < pair_count; ++k) {
+      float best = -1.0f;
+      u32 best_i = (u32)-1;
+      u32 best_j = (u32)-1;
+
+      for (u32 i = 0; i < m; ++i) {
+        if (used_a[i]) continue;
+        const float *hist_a = A->msg_hists + i * 256;
+        for (u32 j = 0; j < n; ++j) {
+          if (used_b[j]) continue;
+          const float *hist_b = B->msg_hists + j * 256;
+          float sim = histogram_similarity(hist_a, hist_b);
+          if (sim > best) {
+            best = sim;
+            best_i = i;
+            best_j = j;
+          }
+        }
+      }
+
+      if (best_i == (u32)-1 || best_j == (u32)-1) break;
+
+      used_a[best_i] = 1;
+      used_b[best_j] = 1;
+      if (best > 0.0f) sum += best;
     }
+
+    ck_free(used_a);
+    ck_free(used_b);
   }
 
-  return total / (float)max_len;
+  return sum / (float)denom;
 }
 
 struct queue_entry *overlay_pick_next(struct queue_entry **cand, u32 n_cand) {

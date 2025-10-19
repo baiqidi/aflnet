@@ -36,9 +36,10 @@ queue grows and shrinks.【F:overlay_sched.c†L23-L45】
 
 ### Similarity scoring and novelty ordering
 
-`overlay_seq_similarity()` compares two sessions by walking their message
-histograms positionally and averaging cosine similarities for matching indices;
-this feeds into the novelty computation within `overlay_pick_next()`.【F:overlay_sched.c†L197-L225】【F:overlay_sched.c†L311-L325】
+`overlay_seq_similarity()` compares two sessions by greedily pairing the most
+similar message histograms and averaging their cosine similarities while
+treating any leftovers as zero-contribution matches; this feeds into the
+novelty computation within `overlay_pick_next()`.【F:overlay_sched.c†L197-L229】【F:overlay_sched.c†L311-L344】
 
 `overlay_pick_next()` groups candidates by their deduplicated state sets,
 computes the average similarity between each member and the rest of its cluster,
@@ -46,6 +47,11 @@ turns that into a novelty score (`1 - avg_sim_all`), and orders members from
 most to least novel. A shared round-robin counter then walks layer by layer
 across clusters so that each state set contributes its next most novel seed in
 turn.【F:overlay_sched.c†L227-L400】
+
+When the environment variables `AFL_DEBUG_OVERLAY` or `AFL_STAT_OVERLAY` are
+set, the scheduler now emits detailed diagnostics: human-readable cluster and
+selection summaries stream to `stderr`, and machine-friendly records are
+appended to `<out_dir>/overlay_stats.log` for offline analysis.【F:overlay_sched.c†L12-L173】【F:overlay_sched.c†L340-L438】
 
 ### Queue window integration
 

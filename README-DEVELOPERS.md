@@ -53,7 +53,7 @@ AFLNet is a state-aware greybox fuzzer for network protocol implementations buil
 ## 常见问题 (FAQ)
 1. **`make` fails because of missing Graphviz headers.** Install `libgraphviz-dev` and rerun the build.
 2. **`llvm_mode` build cannot find `llvm-config`.** Set `LLVM_CONFIG` to the appropriate binary (e.g., `export LLVM_CONFIG=llvm-config-14`).
-3. **Overlay scheduler reports zero novelty.** Verify that feature caches are populated and candidate windows contain diverse state signatures; run with `AFL_DEBUG_OVERLAY=1` for verbose logging.
+3. **Overlay scheduler reports zero novelty.** Verify that feature caches are populated and candidate windows contain diverse state signatures; run with `AFL_DEBUG_OVERLAY=1` for verbose logging and `AFL_STAT_OVERLAY=1` to capture a persistent `overlay_stats.log` under your output directory.
 4. **How do I enable state-aware mode?** Use `afl-fuzz -E -q 3 -s 3 ...` to activate IPSM-guided heuristics alongside the overlay scheduler.
 5. **Where are feature caches stored?** Feature metadata is maintained in-memory within each `queue_entry` and released when entries are pruned.
 

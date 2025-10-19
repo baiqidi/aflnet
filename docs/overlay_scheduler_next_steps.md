@@ -39,7 +39,8 @@ make -j"$(nproc)"
    如 `./findings_dir`。
 4. **环境变量**：决定是否启用调试输出：
    * `AFL_DEBUG_OVERLAY=1` 会打印每次候选排序的详细日志。
-   * `AFL_STAT_OVERLAY=1` 会输出聚类、轮转计数和新颖度分数的统计。
+   * `AFL_STAT_OVERLAY=1` 会把聚类、轮转计数和新颖度分数追加到
+     `<out_dir>/overlay_stats.log`，方便离线分析。
 
 ## 3. 实验步骤（Run the experiment）
 
@@ -61,7 +62,7 @@ make -j"$(nproc)"
    * 结合 `AFL_STAT_OVERLAY` 输出，查看每个簇的候选数量、当前轮转位置以及被选中
      种子的 `novelty = 1 - avg_sim_all`。
 4. **收集中间数据**：若需要更深入分析，可定期复制 `findings_dir/fuzzer_stats` 和
-   `overlay_stats.log`（当启用 `AFL_STAT_OVERLAY=1` 时生成）。
+   `findings_dir/overlay_stats.log`（当启用 `AFL_STAT_OVERLAY=1` 时生成）。
 
 ## 4. 校验特征提取（Validate feature extraction）
 

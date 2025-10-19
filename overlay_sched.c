@@ -3,11 +3,98 @@
 #include "alloc-inl.h"
 
 #include <math.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #define OVERLAY_QUEUE_WINDOW 16
+
+extern u8 *out_dir;
+
+static u8 overlay_log_env_checked = 0;
+static u8 overlay_debug_enabled = 0;
+static u8 overlay_stat_enabled = 0;
+static u8 overlay_stat_header_written = 0;
+static FILE *overlay_stat_fp = NULL;
+static u64 overlay_stat_round = 0;
+
+static void overlay_logging_close(void) {
+  if (overlay_stat_fp) {
+    fclose(overlay_stat_fp);
+    overlay_stat_fp = NULL;
+  }
+}
+
+static void overlay_logging_try_open(void) {
+  if (!overlay_stat_enabled || overlay_stat_fp || !out_dir) return;
+
+  u8 *path = alloc_printf("%s/overlay_stats.log", out_dir);
+  overlay_stat_fp = fopen((char *)path, "a");
+  ck_free(path);
+
+  if (!overlay_stat_fp) {
+    overlay_stat_enabled = 0;
+    return;
+  }
+
+  setvbuf(overlay_stat_fp, NULL, _IOLBF, 0);
+  atexit(overlay_logging_close);
+}
+
+static void overlay_logging_init(void) {
+  if (!overlay_log_env_checked) {
+    const char *dbg = getenv("AFL_DEBUG_OVERLAY");
+    overlay_debug_enabled = dbg && dbg[0] && dbg[0] != '0';
+
+    const char *stat = getenv("AFL_STAT_OVERLAY");
+    overlay_stat_enabled = stat && stat[0] && stat[0] != '0';
+
+    overlay_log_env_checked = 1;
+  }
+
+  overlay_logging_try_open();
+}
+
+static void overlay_log_debug(const char *fmt, ...) {
+  if (!overlay_debug_enabled) return;
+
+  va_list ap;
+  va_start(ap, fmt);
+  vfprintf(stderr, fmt, ap);
+  va_end(ap);
+  fflush(stderr);
+}
+
+static void overlay_logging_write_header(void) {
+  if (!overlay_stat_enabled || !overlay_stat_fp || overlay_stat_header_written)
+    return;
+
+  fprintf(overlay_stat_fp,
+          "# overlay scheduler log\n"
+          "# fields: round type cluster rank candidates clusters signature "
+          "set_size novelty msg_count state_count file\n");
+  overlay_stat_header_written = 1;
+  fflush(overlay_stat_fp);
+}
+
+static void overlay_log_stat(const char *fmt, ...) {
+  if (!overlay_stat_enabled || !overlay_stat_fp) return;
+
+  va_list ap;
+  va_start(ap, fmt);
+  vfprintf(overlay_stat_fp, fmt, ap);
+  va_end(ap);
+  fputc('\n', overlay_stat_fp);
+  fflush(overlay_stat_fp);
+}
+
+static const char *overlay_entry_label(const struct queue_entry *qe) {
+  if (!qe || !qe->fname) return "<null>";
+  const char *name = (const char *)qe->fname;
+  const char *slash = strrchr(name, '/');
+  return slash ? slash + 1 : name;
+}
 
 static struct queue_entry **overlay_queue_window = NULL;
 static u32 overlay_queue_count = 0;
@@ -21,6 +108,7 @@ static inline u32 rol32(u32 x, u8 r) {
 }
 
 void overlay_queue_prepare_entry(struct queue_entry *qe) {
+  overlay_logging_init();
   if (!qe) return;
   qe->novelty_score = 0.0f;
   if (qe->sess_feat) {
@@ -34,6 +122,7 @@ void overlay_queue_prepare_entry(struct queue_entry *qe) {
 }
 
 void overlay_queue_release_entry(struct queue_entry *qe) {
+  overlay_logging_init();
   if (!qe || !qe->sess_feat) return;
   sess_feat_t *feat = qe->sess_feat;
   if (feat->msg_hists) ck_free(feat->msg_hists);
@@ -45,6 +134,7 @@ void overlay_queue_release_entry(struct queue_entry *qe) {
 }
 
 void overlay_queue_reset(void) {
+  overlay_logging_init();
   overlay_queue_count = 0;
   overlay_queue_next_ptr = NULL;
   overlay_queue_next_cur = NULL;
@@ -78,6 +168,7 @@ static u32 state_set_signature(const u32 *states, u32 n_states) {
 }
 
 sess_feat_t *overlay_feat_get_or_build(struct queue_entry *qe) {
+  overlay_logging_init();
   if (!qe) return NULL;
 
   sess_feat_t *feat = qe->sess_feat;
@@ -204,6 +295,7 @@ static float histogram_similarity(const float *a, const float *b) {
 }
 
 float overlay_seq_similarity(const sess_feat_t *A, const sess_feat_t *B) {
+  overlay_logging_init();
   if (!A || !B) return 0.0f;
 
   u32 m = A->msg_count;
@@ -260,14 +352,52 @@ float overlay_seq_similarity(const sess_feat_t *A, const sess_feat_t *B) {
 }
 
 struct queue_entry *overlay_pick_next(struct queue_entry **cand, u32 n_cand) {
+  overlay_logging_init();
   if (!cand || !n_cand) return NULL;
 
   struct queue_entry **candidates = cand;
   sess_feat_t **features = (sess_feat_t **)ck_alloc(sizeof(sess_feat_t *) * n_cand);
 
+  u64 round_id = 0;
+  if (overlay_debug_enabled || overlay_stat_enabled) {
+    round_id = ++overlay_stat_round;
+    overlay_logging_write_header();
+    overlay_log_debug("[overlay] round %llu: %u candidates\n",
+                      (unsigned long long)round_id, n_cand);
+    overlay_log_stat(
+        "round=%llu type=start cluster=-1 rank=-1 candidates=%u clusters=0 "
+        "signature=0 set_size=0 novelty=0 msg_count=0 state_count=0 file=\"-\"",
+        (unsigned long long)round_id, n_cand);
+  }
+
   for (u32 i = 0; i < n_cand; ++i) {
     features[i] = overlay_feat_get_or_build(candidates[i]);
     if (candidates[i]) candidates[i]->novelty_score = 0.0f;
+
+    if (overlay_debug_enabled || overlay_stat_enabled) {
+      const char *label = overlay_entry_label(candidates[i]);
+      if (features[i]) {
+        overlay_log_debug(
+            "[overlay]   cand[%u] file=%s msgs=%u states=%u set=%u sig=0x%08x\n",
+            i, label, features[i]->msg_count, features[i]->state_count,
+            features[i]->state_set_count, features[i]->signature);
+        overlay_log_stat(
+            "round=%llu type=candidate cluster=-1 rank=%u candidates=%u "
+            "clusters=0 signature=0x%08x set_size=%u novelty=0 msg_count=%u "
+            "state_count=%u file=\"%s\"",
+            (unsigned long long)round_id, i, n_cand, features[i]->signature,
+            features[i]->state_set_count, features[i]->msg_count,
+            features[i]->state_count, label);
+      } else {
+        overlay_log_debug(
+            "[overlay]   cand[%u] file=%s has no cached features\n", i, label);
+        overlay_log_stat(
+            "round=%llu type=candidate cluster=-1 rank=%u candidates=%u "
+            "clusters=0 signature=0 set_size=0 novelty=0 msg_count=0 "
+            "state_count=0 file=\"%s\"",
+            (unsigned long long)round_id, i, n_cand, label);
+      }
+    }
   }
 
   struct cluster_info {
@@ -336,10 +466,41 @@ struct queue_entry *overlay_pick_next(struct queue_entry **cand, u32 n_cand) {
     clusters[cid].order = (u32 *)ck_alloc(sizeof(u32) * m);
     for (u32 i = 0; i < m; ++i) clusters[cid].order[i] = i;
 
+    if (overlay_debug_enabled || overlay_stat_enabled) {
+      overlay_log_debug("[overlay] cluster[%u] signature=0x%08x members=%u\n",
+                        cid, clusters[cid].signature, clusters[cid].count);
+      overlay_log_stat(
+          "round=%llu type=cluster cluster=%u rank=-1 candidates=%u "
+          "clusters=%u signature=0x%08x set_size=%u novelty=0 msg_count=0 "
+          "state_count=0 file=\"-\"",
+          (unsigned long long)round_id, cid, clusters[cid].count,
+          cluster_count, clusters[cid].signature,
+          clusters[cid].state_set_count);
+    }
+
     if (m <= 1) {
       clusters[cid].scores[0] = 1.0f;
       u32 only_idx = clusters[cid].indices[0];
       if (candidates[only_idx]) candidates[only_idx]->novelty_score = 1.0f;
+      if (overlay_debug_enabled || overlay_stat_enabled) {
+        const char *label = overlay_entry_label(candidates[only_idx]);
+        overlay_log_debug(
+            "[overlay]   single-member cluster[%u] file=%s novelty=1.0000\n",
+            cid, label);
+        u32 msg_cnt = features[clusters[cid].indices[0]]
+                          ? features[clusters[cid].indices[0]]->msg_count
+                          : 0;
+        u32 state_cnt = features[clusters[cid].indices[0]]
+                            ? features[clusters[cid].indices[0]]->state_count
+                            : 0;
+        overlay_log_stat(
+            "round=%llu type=member cluster=%u rank=0 candidates=%u "
+            "clusters=%u signature=0x%08x set_size=%u novelty=1 msg_count=%u "
+            "state_count=%u file=\"%s\"",
+            (unsigned long long)round_id, cid, clusters[cid].count,
+            cluster_count, clusters[cid].signature,
+            clusters[cid].state_set_count, msg_cnt, state_cnt, label);
+      }
       continue;
     }
 
@@ -370,6 +531,28 @@ struct queue_entry *overlay_pick_next(struct queue_entry **cand, u32 n_cand) {
         }
       }
     }
+
+    if (overlay_debug_enabled || overlay_stat_enabled) {
+      for (u32 layer = 0; layer < m; ++layer) {
+        u32 order_idx = clusters[cid].order[layer];
+        u32 cand_index = clusters[cid].indices[order_idx];
+        const char *label = overlay_entry_label(candidates[cand_index]);
+        float novelty = clusters[cid].scores[order_idx];
+        u32 msg_cnt = features[cand_index] ? features[cand_index]->msg_count : 0;
+        u32 state_cnt =
+            features[cand_index] ? features[cand_index]->state_count : 0;
+        overlay_log_debug(
+            "[overlay]   cluster[%u] rank=%u file=%s novelty=%.4f\n", cid,
+            layer, label, novelty);
+        overlay_log_stat(
+            "round=%llu type=member cluster=%u rank=%u candidates=%u "
+            "clusters=%u signature=0x%08x set_size=%u novelty=%0.6f msg_count=%u "
+            "state_count=%u file=\"%s\"",
+            (unsigned long long)round_id, cid, layer, clusters[cid].count,
+            cluster_count, clusters[cid].signature,
+            clusters[cid].state_set_count, novelty, msg_cnt, state_cnt, label);
+      }
+    }
   }
 
   if (!cluster_count) {
@@ -397,11 +580,17 @@ struct queue_entry *overlay_pick_next(struct queue_entry **cand, u32 n_cand) {
   }
 
   struct queue_entry *selected = NULL;
+  u32 selected_cluster = (u32)-1;
+  u32 selected_rank = (u32)-1;
+  u32 selected_index = (u32)-1;
+  float selected_score = 0.0f;
+  u32 selected_signature = 0;
   u64 slots = (u64)cluster_count * (u64)(max_depth ? max_depth : 1);
   if (!slots) {
     overlay_rr_counter = 0;
     overlay_rr_slots = 0;
     selected = candidates[0];
+    selected_index = 0;
   } else {
     if (overlay_rr_slots != slots) {
       overlay_rr_counter = slots ? (overlay_rr_counter % slots) : 0;
@@ -415,12 +604,52 @@ struct queue_entry *overlay_pick_next(struct queue_entry **cand, u32 n_cand) {
       u32 cid = (u32)(pos % cluster_count);
       if (layer >= clusters[cid].count) continue;
       struct cluster_info *cluster = &clusters[cid];
-      u32 idx_in_cluster = cluster->order[layer];
-      u32 candidate_index = cluster->indices[idx_in_cluster];
+      u32 order_idx = cluster->order[layer];
+      u32 candidate_index = cluster->indices[order_idx];
       selected = candidates[candidate_index];
+      selected_cluster = cid;
+      selected_rank = layer;
+      selected_index = candidate_index;
+      selected_score = cluster->scores[order_idx];
+      selected_signature = cluster->signature;
     }
 
-    if (!selected) selected = candidates[0];
+    if (!selected) {
+      selected = candidates[0];
+      selected_index = 0;
+    }
+  }
+
+  if (selected && selected_index != (u32)-1 && selected_cluster == (u32)-1) {
+    for (u32 cid = 0; cid < cluster_count && selected_cluster == (u32)-1; ++cid) {
+      struct cluster_info *cluster = &clusters[cid];
+      for (u32 layer = 0; layer < cluster->count; ++layer) {
+        u32 order_idx = cluster->order[layer];
+        if (cluster->indices[order_idx] == selected_index) {
+          selected_cluster = cid;
+          selected_rank = layer;
+          selected_score = cluster->scores[order_idx];
+          selected_signature = cluster->signature;
+          break;
+        }
+      }
+    }
+  }
+
+  if (selected && (overlay_debug_enabled || overlay_stat_enabled)) {
+    const char *label = overlay_entry_label(selected);
+    overlay_log_debug(
+        "[overlay] selected file=%s cluster=%u rank=%u novelty=%.4f\n", label,
+        selected_cluster == (u32)-1 ? 0 : selected_cluster,
+        selected_rank == (u32)-1 ? 0 : selected_rank, selected_score);
+    overlay_log_stat(
+        "round=%llu type=selection cluster=%u rank=%u candidates=%u "
+        "clusters=%u signature=0x%08x set_size=0 novelty=%0.6f msg_count=0 "
+        "state_count=0 file=\"%s\"",
+        (unsigned long long)round_id,
+        selected_cluster == (u32)-1 ? 0 : selected_cluster,
+        selected_rank == (u32)-1 ? 0 : selected_rank, total, cluster_count,
+        selected_signature, selected_score, label);
   }
 
   for (u32 cid = 0; cid < cluster_count; ++cid) {

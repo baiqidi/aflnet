@@ -27,7 +27,10 @@ entry on demand. It slices each seed into messages using the recorded AFLNet
 regions, builds 256-bin byte histograms per message with L2 normalization, and
 copies the most recent IPSM state sequence emitted for the session. The state
 sequence is duplicated, sorted, and deduplicated to form an order-insensitive
-state set whose FNV1a-style hash becomes the cluster signature.【F:overlay_sched.c†L80-L195】
+state set whose FNV1a-style hash becomes one possible cluster signature; in
+parallel, every 3-gram (k=3 shingle) over the state sequence is hashed, deduped,
+and collapsed into a 64-bit signature so the runtime can switch to shingle-based
+clustering without recomputing features.【F:overlay_sched.c†L80-L218】
 
 The associated cleanup helpers `overlay_queue_prepare_entry()` and
 `overlay_queue_release_entry()` clear any cached feature data when new queue
@@ -41,12 +44,12 @@ similar message histograms and averaging their cosine similarities while
 treating any leftovers as zero-contribution matches; this feeds into the
 novelty computation within `overlay_pick_next()`.【F:overlay_sched.c†L197-L229】【F:overlay_sched.c†L311-L344】
 
-`overlay_pick_next()` groups candidates by their deduplicated state sets,
-computes the average similarity between each member and the rest of its cluster,
-turns that into a novelty score (`1 - avg_sim_all`), and orders members from
-most to least novel. A shared round-robin counter then walks layer by layer
-across clusters so that each state set contributes its next most novel seed in
-turn.【F:overlay_sched.c†L227-L400】
+`overlay_pick_next()` groups candidates according to the active clustering
+mode—state-set deduplication, no clustering, or k=3 state shingles—computes the
+average similarity between each member and the rest of its cluster, turns that
+into a novelty score (`1 - avg_sim_all`), and orders members from most to least
+novel. A shared round-robin counter then walks layer by layer across clusters so
+that every class contributes its next most novel seed in turn.【F:overlay_sched.c†L227-L413】
 
 When the environment variables `AFL_DEBUG_OVERLAY` or `AFL_STAT_OVERLAY` are
 set, the scheduler now emits detailed diagnostics: human-readable cluster and
@@ -66,6 +69,9 @@ should resume from after fuzzing completes.【F:overlay_sched.c†L403-L446】
 preserving AFLNet’s original heuristics. When targeting a specific IPSM state,
 `choose_seed()` now passes the state’s candidate list through `overlay_pick_next()`
 and advances the state-local index based on the item actually chosen.【F:afl-fuzz.c†L651-L745】
+The new `-G <mode>` command-line flag selects the clustering strategy at runtime
+(`state`, `none`, or `shingle`), forwarding the choice to the overlay module so
+experiments can flip policies without recompilation.【F:afl-fuzz.c†L8065-L8098】【F:afl-fuzz.c†L8836-L9152】
 
 Queue lifecycle hooks call `overlay_queue_prepare_entry()` when new items are
 added and `overlay_queue_release_entry()` during teardown so that the overlay
@@ -78,6 +84,7 @@ overlay layer which entry should be processed next and resets the sliding window
 if the queue is rewound or the scheduling strategy flips back to state-guided
 mode.【F:afl-fuzz.c†L9289-L9521】
 
-Together these pieces implement the requested “cluster by state set → rank by
-novelty → round-robin across clusters” policy without altering how AFLNet
-selects candidate batches or distributes energy outside of the candidate window.
+Together these pieces implement the requested novelty-aware scheduling policies
+while letting users toggle between state-set, flat, and shingle-based clustering
+without altering how AFLNet selects candidate batches or distributes energy
+outside of the candidate window.

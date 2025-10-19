@@ -47,6 +47,7 @@
 #include <unistd.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <time.h>
 #include <errno.h>
 #include <signal.h>
@@ -8100,7 +8101,8 @@ static void usage(u8* argv0) {
        "  -q algo       - state selection algorithm (See aflnet.h for all available options)\n"
        "  -s algo       - seed selection algorithm (See aflnet.h for all available options)\n"
        "  -b algo       - feedback type (See aflnet.h for all available options)\n"
-       "  -h algo       - seed schedule type (See aflnet.h for all available options)\n\n"
+       "  -h algo       - seed schedule type (See aflnet.h for all available options)\n"
+       "  -G mode       - overlay clustering: state, none, or shingle\n\n"
 
        "Other stuff:\n\n"
 
@@ -8825,7 +8827,8 @@ int main(int argc, char** argv) {
   gettimeofday(&tv, &tz);
   srandom(tv.tv_sec ^ tv.tv_usec ^ getpid());
 
-  while ((opt = getopt(argc, argv, "+i:o:f:m:t:T:dnCB:S:M:x:QN:D:W:w:e:P:KEq:s:RFc:l:b:h:")) > 0)
+  while ((opt = getopt(argc, argv,
+                       "+i:o:f:m:t:T:dnCB:S:M:x:QN:D:W:w:e:P:KEq:s:RFc:l:b:h:G:")) > 0)
 
     switch (opt) {
 
@@ -9137,8 +9140,31 @@ int main(int argc, char** argv) {
 
         if (local_port) FATAL("Multiple -l options not supported");
         local_port = atoi(optarg);
-	      if (local_port < 1024 || local_port > 65535) FATAL("Invalid source port number");
+              if (local_port < 1024 || local_port > 65535) FATAL("Invalid source port number");
         break;
+
+      case 'G': { /* overlay clustering mode */
+        u8 mode = OVERLAY_CLUSTER_STATE_SET;
+
+        if (!strcmp(optarg, "0") || !strcasecmp(optarg, "state") ||
+            !strcasecmp(optarg, "states") || !strcasecmp(optarg, "set") ||
+            !strcasecmp(optarg, "state-set")) {
+          mode = OVERLAY_CLUSTER_STATE_SET;
+        } else if (!strcmp(optarg, "1") || !strcasecmp(optarg, "none") ||
+                   !strcasecmp(optarg, "flat")) {
+          mode = OVERLAY_CLUSTER_NONE;
+        } else if (!strcmp(optarg, "2") || !strcasecmp(optarg, "shingle") ||
+                   !strcasecmp(optarg, "k3") ||
+                   !strcasecmp(optarg, "shingle-k3")) {
+          mode = OVERLAY_CLUSTER_SHINGLE_K3;
+        } else {
+          FATAL("Unknown overlay clustering mode '%s' (use state, none, or shingle)",
+                optarg);
+        }
+
+        overlay_set_cluster_mode(mode);
+        break;
+      }
 
       default:
 

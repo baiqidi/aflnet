@@ -41,6 +41,10 @@ make -j"$(nproc)"
    * `AFL_DEBUG_OVERLAY=1` 会打印每次候选排序的详细日志。
    * `AFL_STAT_OVERLAY=1` 会把聚类、轮转计数和新颖度分数追加到
      `<out_dir>/overlay_stats.log`，方便离线分析。
+5. **聚类模式**：运行时通过 `-G` 选择候选分类策略：
+   * `-G state`（默认）按状态集合去重。
+   * `-G none` 跳过聚类，直接在整体集合上计算新颖度。
+   * `-G shingle` 依据状态序列的 k=3 连片哈希分簇。
 
 ## 3. 实验步骤（Run the experiment）
 
@@ -51,12 +55,12 @@ make -j"$(nproc)"
    ```bash
    AFL_DEBUG_OVERLAY=1 AFL_STAT_OVERLAY=1 ./afl-fuzz \
      -i seeds_dir -o findings_dir \
-     -N udp -P XYZ -D 1000 -- ./target_binary @@
+     -N udp -P XYZ -D 1000 -G state -- ./target_binary @@
    ```
 
    * 如果需要 TLS、TCP 或自定义端口，请参考 `README.md` 调整附加参数。
    * 运行后在终端中观察 `overlay: cluster=... novelty=...` 等日志，确认覆盖调度器
-     已经接管候选排序流程。
+     已经接管候选排序流程。不同的 `-G` 模式会在日志的 `mode=` 字段中体现。
 3. **监控运行状态**：
    * 在 AFLNet 主界面关注 `#queue`, `pending_favs` 等指标判断整体进展。
    * 结合 `AFL_STAT_OVERLAY` 输出，查看每个簇的候选数量、当前轮转位置以及被选中
@@ -66,17 +70,17 @@ make -j"$(nproc)"
 
 ## 4. 校验特征提取（Validate feature extraction）
 
-1. 保持 `AFL_DEBUG_OVERLAY=1`，在日志中关注 `msg_count`, `state_count` 等字段。
-   它们分别来自 `overlay_extract_messages()` 与缓存的状态序列，可用来核对消息切分
-   与直方图统计是否符合预期。
+1. 保持 `AFL_DEBUG_OVERLAY=1`，在日志中关注 `msg_count`, `state_count`、`key=` 等
+   字段。它们分别来自 `overlay_extract_messages()`、缓存的状态序列以及当前聚类键
+   （状态集合或 shingle 数量），可用来核对消息切分与直方图统计是否符合预期。
 2. 如果发现消息边界异常，检查 `aflnet.c` 中写入 `region_t` 结构的逻辑，确认记录的
    `start_off` / `end_off` 与实际报文对应。
 
 ## 5. 分析聚类与轮转结果（Inspect clustering & scheduling）
 
-1. 在 `AFL_STAT_OVERLAY` 输出中比对不同簇的 `signature`；若全部种子落在同一簇，
-   可能意味着 IPSM 状态序列完全一致，可以通过增加目标覆盖或手动构造差异输入来
-   拉开簇。
+1. 在 `AFL_STAT_OVERLAY` 输出中比对不同簇的 `signature` 与 `key_len`。若全部种子落
+   在同一簇，可能意味着在当前 `-G` 模式下的聚类键完全一致，可以通过切换到其他
+   模式或手工构造差异输入来拉开簇。
 2. 观察 `overlay_rr_pos` 或类似字段，确认轮转指针按簇依次推进。构造“多 vs. 少”
    种子簇的对比实验，验证轮转不会让小簇长期饥饿。
 

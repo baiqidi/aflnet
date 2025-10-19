@@ -1,7 +1,7 @@
 # AFLNet Developer README / 开发者指南
 
 ## 项目简介 / Project Overview
-AFLNet is a state-aware greybox fuzzer for network protocol implementations built on top of American Fuzzy Lop (AFL). It replays captured client-server message sequences, mutates them, and leverages coverage plus protocol response feedback to explore complex server state machines. This repository extends AFLNet with an overlay scheduler that extracts per-seed session features, clusters executions by IPSM state signatures, and prioritizes novel seeds via round-robin rotation across clusters. The goal of this document is to help developers bootstrap a working environment, understand the code layout, and contribute changes confidently.
+AFLNet is a state-aware greybox fuzzer for network protocol implementations built on top of American Fuzzy Lop (AFL). It replays captured client-server message sequences, mutates them, and leverages coverage plus protocol response feedback to explore complex server state machines. This repository extends AFLNet with an overlay scheduler that extracts per-seed session features, clusters executions by configurable IPSM-derived signatures (state sets or k=3 shingles), or flattens them entirely, and prioritizes novel seeds via round-robin rotation across clusters. The goal of this document is to help developers bootstrap a working environment, understand the code layout, and contribute changes confidently.
 
 ## 环境配置与快速启动 / Environment Setup & Quick Start
 1. **Install prerequisites (Ubuntu 20.04/22.04 tested):**
@@ -56,6 +56,7 @@ AFLNet is a state-aware greybox fuzzer for network protocol implementations buil
 3. **Overlay scheduler reports zero novelty.** Verify that feature caches are populated and candidate windows contain diverse state signatures; run with `AFL_DEBUG_OVERLAY=1` for verbose logging and `AFL_STAT_OVERLAY=1` to capture a persistent `overlay_stats.log` under your output directory.
 4. **How do I enable state-aware mode?** Use `afl-fuzz -E -q 3 -s 3 ...` to activate IPSM-guided heuristics alongside the overlay scheduler.
 5. **Where are feature caches stored?** Feature metadata is maintained in-memory within each `queue_entry` and released when entries are pruned.
+6. **How do I change the overlay clustering strategy?** Pass `-G state`, `-G none`, or `-G shingle` when launching `afl-fuzz` to choose between state-set deduplication, flat ordering, or k=3 shingle clustering.
 
 ## 运行测试用例 / Running Tests & Diagnostics
 - **Primary build & self-test:**
@@ -71,7 +72,7 @@ AFLNet is a state-aware greybox fuzzer for network protocol implementations buil
   ```bash
   AFL_DEBUG_OVERLAY=1 ./afl-fuzz \
     -d -i testcases/<protocol> -o out-overlay \
-    -N tcp://127.0.0.1/<port> -P <protocol_name> [extra AFLNet flags] -- \
+    -N tcp://127.0.0.1/<port> -P <protocol_name> -G state [extra AFLNet flags] -- \
     ./path/to/server_binary <server_args>
   ```
 - **Static analysis (optional):**

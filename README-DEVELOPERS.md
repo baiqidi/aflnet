@@ -79,7 +79,37 @@ AFLNet is a state-aware greybox fuzzer for network protocol implementations buil
   ```bash
   clang-tidy overlay_sched.c -- -I.
   ```
+## Example
+在命令中选择分类方式
+运行 afl-fuzz 时加上 -G <mode> 参数即可指定种子分类策略，其中 <mode> 可以是下列三种之一：
 
+state：使用状态集合去重（当前默认实现）。
+
+none：不做任何分组，直接对整个候选集做相似度评分。
+
+shingle：基于 k=3 状态 shingle 生成簇签名，再按照签名分组。
+
+示例：将选项应用到你的命令
+下面示例展示了三种模式的完整命令（只需把 state 换成需要的模式即可）：
+```
+AFL_DEBUG_OVERLAY=1 AFL_STAT_OVERLAY=1 timeout 1h \
+  /home/hxq/Documents/AFLnet-sort/aflnet/afl-fuzz -d \
+  -i- \
+  -o /home/hxq/Documents/AFLnet-sort/live555/testProgs/out_seed_1h_initial \
+  -N tcp://127.0.0.1/8554 \
+  -x $AFLNET/tutorials/live555/rtsp.dict \
+  -P RTSP -D 10000 -q 3 -s 3 -E -K \
+  -G state \        # 或改成 none / shingle
+  -R ./testOnDemandRTSPServer 8554
+```
+```
+AFL_DEBUG_OVERLAY=1 AFL_STAT_OVERLAY=1 timeout 1h /home/hxq/Documents/AFLnet-sort/aflnet/afl-fuzz -d -i- -o /home/hxq/Documents/AFLnet-sort/live555/testProgs/out_seed_1h_initial -N tcp://127.0.0.1/8554 -x $AFLNET/tutorials/live555/rtsp.dict -P RTSP -D 10000 -q 3 -s 3 -E -K -G state -R ./testOnDemandRTSPServer 8554
+```
+若想使用无分组模式，把 -G state 改为 -G none。
+
+若想启用 k=3 shingle 聚类，把该参数改为 -G shingle。
+
+其他参数无需调整，fuzzer 会按照你选择的模式在候选集合内完成排序与轮转调度。
 ## 贡献建议 / Contribution Tips
 - Use `clang-format` (e.g., `clang-format -i overlay_sched.c`) before committing C/C++ changes.
 - Add regression artifacts under `docs/` or `tutorials/` to document new protocol targets.

@@ -47,6 +47,7 @@
 #include <unistd.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <time.h>
 #include <errno.h>
 #include <signal.h>
@@ -69,8 +70,9 @@
 #include <sys/capability.h>
 
 #include "aflnet.h"
+#include "queue_entry_types.h"
+#include "overlay_sched.h"
 #include <graphviz/gvc.h>
-#include <math.h>
 
 #if defined(__APPLE__) || defined(__FreeBSD__) || defined (__OpenBSD__)
 #  include <sys/sysctl.h>
@@ -240,41 +242,6 @@ static s32 cpu_aff = -1;       	      /* Selected CPU core                */
 
 static FILE* plot_file;               /* Gnuplot output file              */
 
-struct queue_entry {
-
-  u8* fname;                          /* File name for the test case      */
-  u32 len;                            /* Input length                     */
-
-  u8  cal_failed,                     /* Calibration failed?              */
-      trim_done,                      /* Trimmed?                         */
-      was_fuzzed,                     /* Had any fuzzing done yet?        */
-      passed_det,                     /* Deterministic stages passed?     */
-      has_new_cov,                    /* Triggers new coverage?           */
-      var_behavior,                   /* Variable behavior?               */
-      favored,                        /* Currently favored?               */
-      fs_redundant;                   /* Marked as redundant in the fs?   */
-
-  u32 bitmap_size,                    /* Number of bits set in bitmap     */
-      exec_cksum;                     /* Checksum of the execution trace  */
-
-  u64 exec_us,                        /* Execution time (us)              */
-      handicap,                       /* Number of queue cycles behind    */
-      depth;                          /* Path depth                       */
-
-  u8* trace_mini;                     /* Trace bytes, if kept             */
-  u32 tc_ref;                         /* Trace bytes ref count            */
-
-  struct queue_entry *next,           /* Next element, if any             */
-                     *next_100;       /* 100 elements ahead               */
-
-  region_t *regions;                  /* Regions keeping information of message(s) sent to the server under test */
-  u32 region_count;                   /* Total number of regions in this seed */
-  u32 index;                          /* Index of this queue entry in the whole queue */
-  u32 generating_state_id;            /* ID of the start at which the new seed was generated */
-  u8 is_initial_seed;                 /* Is this an initial seed */
-  u32 unique_state_count;             /* Unique number of states traversed by this queue entry */
-
-};
 
 static struct queue_entry *queue,     /* Fuzzing queue (linked list)      */
                           *queue_cur, /* Current offset within the queue  */
@@ -694,6 +661,24 @@ struct queue_entry *choose_seed(u32 target_state_id, u8 mode)
     state = kh_val(khms_states, k);
 
     if (state->seeds_count == 0) return NULL;
+
+    struct queue_entry **cand =
+        (struct queue_entry **)ck_alloc(sizeof(struct queue_entry *) * state->seeds_count);
+    for (u32 i = 0; i < state->seeds_count; ++i) {
+      cand[i] = (struct queue_entry *)state->seeds[i];
+    }
+
+    struct queue_entry *overlay_sel = overlay_pick_next(cand, state->seeds_count);
+    ck_free(cand);
+    if (overlay_sel) {
+      for (u32 i = 0; i < state->seeds_count; ++i) {
+        if (state->seeds[i] == overlay_sel) {
+          state->selected_seed_index = (i + 1) % state->seeds_count;
+          break;
+        }
+      }
+      return overlay_sel;
+    }
 
     switch (mode) {
       case RANDOM_SELECTION: //Random seed selection
@@ -1585,8 +1570,10 @@ static void add_to_queue(u8* fname, u32 len, u8 passed_det) {
   q->index        = queued_paths;
   q->generating_state_id = target_state_id;
   q->is_initial_seed = 0;
-
+  
   if (q->depth > max_depth) max_depth = q->depth;
+
+  overlay_queue_prepare_entry(q);
 
   if (queue_top) {
 
@@ -1666,6 +1653,7 @@ EXP_ST void destroy_queue(void) {
       if (q->regions[i].state_sequence) ck_free(q->regions[i].state_sequence);
     }
     if (q->regions) ck_free(q->regions);
+    overlay_queue_release_entry(q);
     ck_free(q);
     q = n;
 
@@ -8113,7 +8101,9 @@ static void usage(u8* argv0) {
        "  -q algo       - state selection algorithm (See aflnet.h for all available options)\n"
        "  -s algo       - seed selection algorithm (See aflnet.h for all available options)\n"
        "  -b algo       - feedback type (See aflnet.h for all available options)\n"
-       "  -h algo       - seed schedule type (See aflnet.h for all available options)\n\n"
+       "  -h algo       - seed schedule type (See aflnet.h for all available options)\n"
+       "  -O on|off     - toggle overlay seed sorting\n"
+       "  -G mode       - overlay clustering: state, none, or shingle\n\n"
 
        "Other stuff:\n\n"
 
@@ -8838,7 +8828,8 @@ int main(int argc, char** argv) {
   gettimeofday(&tv, &tz);
   srandom(tv.tv_sec ^ tv.tv_usec ^ getpid());
 
-  while ((opt = getopt(argc, argv, "+i:o:f:m:t:T:dnCB:S:M:x:QN:D:W:w:e:P:KEq:s:RFc:l:b:h:")) > 0)
+  while ((opt = getopt(argc, argv,
+                       "+i:o:f:m:t:T:dnCB:S:M:x:QN:D:W:w:e:P:KEq:s:RFc:l:b:h:G:O:")) > 0)
 
     switch (opt) {
 
@@ -9150,8 +9141,51 @@ int main(int argc, char** argv) {
 
         if (local_port) FATAL("Multiple -l options not supported");
         local_port = atoi(optarg);
-	      if (local_port < 1024 || local_port > 65535) FATAL("Invalid source port number");
+              if (local_port < 1024 || local_port > 65535) FATAL("Invalid source port number");
         break;
+
+      case 'O': { /* overlay enable / disable */
+        u8 enabled = 1;
+
+        if (!strcmp(optarg, "0") || !strcasecmp(optarg, "off") ||
+            !strcasecmp(optarg, "disable") || !strcasecmp(optarg, "disabled") ||
+            !strcasecmp(optarg, "no") || !strcasecmp(optarg, "false")) {
+          enabled = 0;
+        } else if (!strcmp(optarg, "1") || !strcasecmp(optarg, "on") ||
+                   !strcasecmp(optarg, "enable") ||
+                   !strcasecmp(optarg, "enabled") || !strcasecmp(optarg, "yes") ||
+                   !strcasecmp(optarg, "true")) {
+          enabled = 1;
+        } else {
+          FATAL("Unknown overlay toggle '%s' (use on/off)", optarg);
+        }
+
+        overlay_set_enabled(enabled);
+        break;
+      }
+
+      case 'G': { /* overlay clustering mode */
+        u8 mode = OVERLAY_CLUSTER_STATE_SET;
+
+        if (!strcmp(optarg, "0") || !strcasecmp(optarg, "state") ||
+            !strcasecmp(optarg, "states") || !strcasecmp(optarg, "set") ||
+            !strcasecmp(optarg, "state-set")) {
+          mode = OVERLAY_CLUSTER_STATE_SET;
+        } else if (!strcmp(optarg, "1") || !strcasecmp(optarg, "none") ||
+                   !strcasecmp(optarg, "flat")) {
+          mode = OVERLAY_CLUSTER_NONE;
+        } else if (!strcmp(optarg, "2") || !strcasecmp(optarg, "shingle") ||
+                   !strcasecmp(optarg, "k3") ||
+                   !strcasecmp(optarg, "shingle-k3")) {
+          mode = OVERLAY_CLUSTER_SHINGLE_K3;
+        } else {
+          FATAL("Unknown overlay clustering mode '%s' (use state, none, or shingle)",
+                optarg);
+        }
+
+        overlay_set_cluster_mode(mode);
+        break;
+      }
 
       default:
 
@@ -9306,6 +9340,7 @@ int main(int argc, char** argv) {
       /* Failed to find a new paths in the past 1 mins */
       if (UR(100) < (get_cur_time() - last_path_time) / time_gap) {
         code_aware_schedule = 0;
+        overlay_queue_reset();
         struct queue_entry *selected_seed = NULL;
         while(!selected_seed || selected_seed->region_count == 0) {
           /* choose a state */
@@ -9342,6 +9377,7 @@ int main(int argc, char** argv) {
             }
           }
         }
+        overlay_queue_reset();
       }
       else{
         code_aware_schedule = 1;
@@ -9354,6 +9390,7 @@ int main(int argc, char** argv) {
           current_entry     = 0;
           cur_skipped_paths = 0;
           queue_cur         = queue;
+          overlay_queue_reset();
 
           while (seek_to) {
             current_entry++;
@@ -9382,6 +9419,10 @@ int main(int argc, char** argv) {
         }
       }
 
+      if (code_aware_schedule && queue_cur) {
+        queue_cur = overlay_pick_from_queue_window(queue_cur);
+      }
+
       skipped_fuzz = fuzz_one(use_argv);
 
       if (!stop_soon && sync_id && !skipped_fuzz) {
@@ -9396,7 +9437,8 @@ int main(int argc, char** argv) {
       if (stop_soon) break;
 
       if (code_aware_schedule){
-        queue_cur = queue_cur->next;
+        queue_cur = overlay_queue_current();
+        if (!queue_cur) overlay_queue_reset();
         current_entry++;
       }
     }
@@ -9446,6 +9488,8 @@ int main(int argc, char** argv) {
         }
       }
 
+      overlay_queue_reset();
+
       skipped_fuzz = fuzz_one(use_argv);
 
       if (!stop_soon && sync_id && !skipped_fuzz) {
@@ -9472,6 +9516,7 @@ int main(int argc, char** argv) {
         current_entry     = 0;
         cur_skipped_paths = 0;
         queue_cur         = queue;
+        overlay_queue_reset();
 
         while (seek_to) {
           current_entry++;
@@ -9502,6 +9547,10 @@ int main(int argc, char** argv) {
 
       }
 
+      if (queue_cur) {
+        queue_cur = overlay_pick_from_queue_window(queue_cur);
+      }
+
       skipped_fuzz = fuzz_one(use_argv);
 
       if (!stop_soon && sync_id && !skipped_fuzz) {
@@ -9515,7 +9564,8 @@ int main(int argc, char** argv) {
 
       if (stop_soon) break;
 
-      queue_cur = queue_cur->next;
+      queue_cur = overlay_queue_current();
+      if (!queue_cur) overlay_queue_reset();
       current_entry++;
 
     }
